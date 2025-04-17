@@ -26,41 +26,117 @@ type SmartContract struct {
 	contractapi.Contract
 }
 
+func getMSPID(ctx contractapi.TransactionContextInterface) (string, error) {
+	return ctx.GetClientIdentity().GetMSPID()
+}
+
+func getTimestamp() string {
+	return time.Now().Format("2006-01-02 15:04:05")
+}
+
 // ============== MANUFACTURER FUNCTIONS ==============
-func (s *SmartContract) RegisterDrug(ctx contractapi.TransactionContextInterface, 
+func (s *SmartContract) RegisterDrug(ctx contractapi.TransactionContextInterface,
 	drugID string, name string, batchNumber string, mfgDate string, expiryDate string, composition string) error {
-	
-	// TODO: Verify caller is CiplaMSP
-	// TODO: Check if drug exists
-	// TODO: Initialize drug object with all fields
-	// TODO: Add creation event to history
-	// TODO: Save to ledger
-	return fmt.Errorf("implementation pending")
+
+	mspID, err := getMSPID(ctx)
+	if err != nil || mspID != "CiplaMSP" {
+		return fmt.Errorf("only Cipla (Manufacturer) can register drugs")
+	}
+
+	existing, err := ctx.GetStub().GetState(drugID)
+	if err != nil {
+		return err
+	}
+	if existing != nil {
+		return fmt.Errorf("drug with ID %s already exists", drugID)
+	}
+
+	drug := Drug{
+		DrugID:       drugID,
+		Name:         name,
+		Manufacturer: "Cipla",
+		BatchNumber:  batchNumber,
+		MfgDate:      mfgDate,
+		ExpiryDate:   expiryDate,
+		Composition:  composition,
+		CurrentOwner: "Cipla",
+		Status:       "InProduction",
+		IsRecalled:   false,
+		History: []string{
+			fmt.Sprintf("%s|Created|Cipla|-|Batch: %s", getTimestamp(), batchNumber),
+		},
+	}
+
+	bytes, _ := json.Marshal(drug)
+	return ctx.GetStub().PutState(drugID, bytes)
 }
 
 // ============== DISTRIBUTION FUNCTIONS ==============
 func (s *SmartContract) ShipDrug(ctx contractapi.TransactionContextInterface, drugID string, to string) error {
-	// TODO: Verify current owner is caller
-	// TODO: Update CurrentOwner and Status
-	// TODO: Add shipment record to history
-	// TODO: Emit shipment event
-	return fmt.Errorf("implementation pending")
+	drugBytes, err := ctx.GetStub().GetState(drugID)
+	if err != nil || drugBytes == nil {
+		return fmt.Errorf("drug %s not found", drugID)
+	}
+
+	var drug Drug
+	if err := json.Unmarshal(drugBytes, &drug); err != nil {
+		return err
+	}
+
+	mspID, _ := getMSPID(ctx)
+	if drug.CurrentOwner != mspID[:len(mspID)-3] { // e.g., "Cipla" from "CiplaMSP"
+		return fmt.Errorf("only the current owner can ship this drug")
+	}
+
+	from := drug.CurrentOwner
+	drug.CurrentOwner = to
+	drug.Status = "InTransit"
+	drug.History = append(drug.History, fmt.Sprintf("%s|Shipped|%s|%s|", getTimestamp(), from, to))
+
+	// Emit an event (optional)
+	ctx.GetStub().SetEvent("DrugShipped", []byte(drugID))
+
+	bytes, _ := json.Marshal(drug)
+	return ctx.GetStub().PutState(drugID, bytes)
 }
 
 // ============== REGULATOR FUNCTIONS ==============
 func (s *SmartContract) RecallDrug(ctx contractapi.TransactionContextInterface, drugID string, reason string) error {
-	// TODO: Verify caller is CDSCOMSP
-	// TODO: Set IsRecalled=true
-	// TODO: Add recall note to InspectionNotes
-	return fmt.Errorf("implementation pending")
+	mspID, err := getMSPID(ctx)
+	if err != nil || mspID != "CDSCOMSP" {
+		return fmt.Errorf("only CDSCO (Regulator) can recall drugs")
+	}
+
+	drugBytes, err := ctx.GetStub().GetState(drugID)
+	if err != nil || drugBytes == nil {
+		return fmt.Errorf("drug %s not found", drugID)
+	}
+
+	var drug Drug
+	_ = json.Unmarshal(drugBytes, &drug)
+
+	drug.IsRecalled = true
+	drug.Status = "Recalled"
+	drug.InspectionNotes = append(drug.InspectionNotes, fmt.Sprintf("%s: %s", getTimestamp(), reason))
+	drug.History = append(drug.History, fmt.Sprintf("%s|Recalled|CDSCO|-|Reason: %s", getTimestamp(), reason))
+
+	// Emit recall event
+	ctx.GetStub().SetEvent("DrugRecalled", []byte(drugID))
+
+	bytes, _ := json.Marshal(drug)
+	return ctx.GetStub().PutState(drugID, bytes)
 }
 
 // ============== COMMON FUNCTIONS ==============
 func (s *SmartContract) TrackDrug(ctx contractapi.TransactionContextInterface, drugID string) (string, error) {
-	// TODO: Return full drug history as JSON
-	return "", fmt.Errorf("implementation pending")
+	data, err := ctx.GetStub().GetState(drugID)
+	if err != nil || data == nil {
+		return "", fmt.Errorf("drug %s not found", drugID)
+	}
+	return string(data), nil
 }
 
+// ============== MAIN ==============
 func main() {
 	chaincode, err := contractapi.NewChaincode(&SmartContract{})
 	if err != nil {
